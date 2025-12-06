@@ -1,7 +1,7 @@
 """
 stock_analyzer_core.py
 Core engine for stock analysis (no email, no web).
-We will import run_analysis() and run_market_scan() from our Flask app.
+We will import run_analysis() and scan_market() from our Flask app.
 """
 
 import warnings, os, time
@@ -23,6 +23,39 @@ CACHE_TTL = 600  # 10 minutes
 warnings.filterwarnings("ignore", message="YF.download")
 
 TZ = "Asia/Kolkata"
+
+
+# --------- UNIVERSE: NIFTY50 + SENSEX (deduplicated) ---------
+ALL_TICKERS = [
+    # NIFTY 50 (approx list, can edit freely)
+    "ADANIENT.NS", "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS",
+    "AXISBANK.NS", "BAJAJ-AUTO.NS", "BAJFINANCE.NS", "BAJAJFINSV.NS",
+    "BPCL.NS", "BHARTIARTL.NS", "BRITANNIA.NS", "CIPLA.NS",
+    "COALINDIA.NS", "DIVISLAB.NS", "DRREDDY.NS", "EICHERMOT.NS",
+    "GRASIM.NS", "HCLTECH.NS", "HDFCBANK.NS", "HDFCLIFE.NS",
+    "HEROMOTOCO.NS", "HINDALCO.NS", "HINDUNILVR.NS", "ICICIBANK.NS",
+    "INDUSINDBK.NS", "INFY.NS", "IOC.NS", "ITC.NS",
+    "JSWSTEEL.NS", "KOTAKBANK.NS", "LT.NS", "M&M.NS",
+    "MARUTI.NS", "NESTLEIND.NS", "NTPC.NS", "ONGC.NS",
+    "POWERGRID.NS", "RELIANCE.NS", "SBILIFE.NS", "SBIN.NS",
+    "SHREECEM.NS", "SUNPHARMA.NS", "TATACONSUM.NS", "TATAMOTORS.NS",
+    "TATASTEEL.NS", "TCS.NS", "TECHM.NS", "TITAN.NS",
+    "UPL.NS", "ULTRACEMCO.NS", "WIPRO.NS",
+
+    # Sensex extras (some overlap with above; duplicates are harmless)
+    "ASIANPAINT.NS", "AXISBANK.NS", "BAJAJ-AUTO.NS", "BAJAJFINSV.NS",
+    "BAJFINANCE.NS", "BHARTIARTL.NS", "CIPLA.NS", "DRREDDY.NS",
+    "HCLTECH.NS", "HDFCBANK.NS", "HINDUNILVR.NS", "ICICIBANK.NS",
+    "INDUSINDBK.NS", "INFY.NS", "ITC.NS", "JSWSTEEL.NS",
+    "KOTAKBANK.NS", "LT.NS", "M&M.NS", "MARUTI.NS",
+    "NESTLEIND.NS", "NTPC.NS", "ONGC.NS", "POWERGRID.NS",
+    "RELIANCE.NS", "SBIN.NS", "SUNPHARMA.NS", "TATAMOTORS.NS",
+    "TCS.NS", "TECHM.NS", "TITAN.NS", "ULTRACEMCO.NS"
+]
+
+# Remove exact duplicates while preserving order
+_seen = set()
+ALL_TICKERS = [t for t in ALL_TICKERS if not (t in _seen or _seen.add(t))]
 
 
 def get_today_india():
@@ -58,7 +91,7 @@ def cleanup_old_files(folder, hours=6):
         if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
             try:
                 os.remove(path)
-            except:
+            except Exception:
                 pass
 
 
@@ -109,7 +142,7 @@ def run_analysis(ticker="SOLARINDS.NS", show_plot=False):
     df["VWAP"] = (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
     df["VWAP_Diff_%"] = (df["Close"] - df["VWAP"]) / df["VWAP"] * 100
 
-    # ------------- Spike detection (kept for completeness) -------------
+    # ------------- Spike detection -------------
     df["Spike_ruleA"] = df["Volume"] > 1.5 * df["VMA_20"]
     roll_mean = df["Volume"].rolling(window=60, min_periods=10).mean()
     roll_std = df["Volume"].rolling(window=60, min_periods=10).std()
@@ -232,107 +265,93 @@ def run_analysis(ticker="SOLARINDS.NS", show_plot=False):
     return df, summary, report_path
 
 
-# ======================================================================
-# New: Market Scan for NIFTY 50 + Sensex 30
-# - Uses full RandomForest pipeline (same quality as single-stock)
-# - On-demand only when /market-scan is visited
-# - Deduplicates STRICTLY by stock name (before the .NS / .BO)
-#   and keeps the highest probability per stock (Method 1).
-# ======================================================================
+# ----------------- Explainability helpers -----------------
 
-NIFTY50_TICKERS = [
-    "ADANIENT.NS", "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS",
-    "AXISBANK.NS", "BAJAJ-AUTO.NS", "BAJFINANCE.NS", "BAJAJFINSV.NS",
-    "BPCL.NS", "BHARTIARTL.NS", "BRITANNIA.NS", "CIPLA.NS", "COALINDIA.NS",
-    "DIVISLAB.NS", "DRREDDY.NS", "EICHERMOT.NS", "GRASIM.NS", "HCLTECH.NS",
-    "HDFCBANK.NS", "HDFCLIFE.NS", "HEROMOTOCO.NS", "HINDALCO.NS",
-    "HINDUNILVR.NS", "ICICIBANK.NS", "INDUSINDBK.NS", "INFY.NS",
-    "ITC.NS", "JSWSTEEL.NS", "KOTAKBANK.NS", "LT.NS", "M&M.NS",
-    "MARUTI.NS", "NESTLEIND.NS", "NTPC.NS", "ONGC.NS", "POWERGRID.NS",
-    "RELIANCE.NS", "SBILIFE.NS", "SBIN.NS", "SHREECEM.NS", "SUNPHARMA.NS",
-    "TCS.NS", "TATACONSUM.NS", "TATAMOTORS.NS", "TATASTEEL.NS",
-    "TECHM.NS", "TITAN.NS", "ULTRACEMCO.NS", "UPL.NS", "WIPRO.NS"
-]
-
-SENSEX30_TICKERS = [
-    "ASIANPAINT.NS", "AXISBANK.NS", "BAJAJ-AUTO.NS", "BAJFINANCE.NS",
-    "BAJAJFINSV.NS", "BHARTIARTL.NS", "DRREDDY.NS", "HCLTECH.NS",
-    "HDFC.NS", "HDFCBANK.NS", "HINDUNILVR.NS", "ICICIBANK.NS",
-    "INDUSINDBK.NS", "INFY.NS", "ITC.NS", "KOTAKBANK.NS", "LT.NS",
-    "M&M.NS", "MARUTI.NS", "NESTLEIND.NS", "NTPC.NS", "ONGC.NS",
-    "POWERGRID.NS", "RELIANCE.NS", "SBIN.NS", "SUNPHARMA.NS",
-    "TCS.NS", "TATAMOTORS.NS", "TATASTEEL.NS"
-]
-
-
-def run_market_scan():
+def _build_explanation(summary: dict) -> str:
     """
-    Runs a full RandomForest-based scan across NIFTY 50 + Sensex 30.
-
-    - Uses run_analysis() for each ticker (same quality as single-stock view).
-    - Skips tickers where ML probability is None.
-    - Deduplicates by *stock name only* (before the suffix like .NS / .BO)
-      and keeps the entry with highest probability.
-    - Returns two lists for Flask:
-        bullish_rows: list of dicts with prob > 0.70
-        bearish_rows: list of dicts with prob < 0.30
-    Each dict: { 'name', 'ticker', 'prob' }
+    Turn summary metrics into a short human-readable sentence.
+    This is what appears under each stock in the Market Scan.
     """
-    all_tickers = NIFTY50_TICKERS + SENSEX30_TICKERS
+    parts = []
 
-    raw_rows = []
+    ss = summary.get("strength_score")
+    direction = summary.get("strength_direction")
+    if ss is not None:
+        parts.append(f"Strength score {ss:.2f} ({direction}).")
 
-    for ticker in all_tickers:
+    vwap = summary.get("vwap_deviation_pct")
+    if vwap is not None:
+        if vwap > 0:
+            parts.append(f"Price ~{abs(vwap):.1f}% above VWAP.")
+        elif vwap < 0:
+            parts.append(f"Price ~{abs(vwap):.1f}% below VWAP.")
+
+    rv = summary.get("relative_volume")
+    if rv is not None:
+        parts.append(f"Relative volume ~{rv:.2f}× vs 20-day average.")
+
+    prob = summary.get("ml_prob_up")
+    if prob is not None:
+        parts.append(f"Model sees {prob * 100:.1f}% chance of next-day rise.")
+
+    if not parts:
+        return "No clear signal — insufficient recent data."
+    return " ".join(parts)
+
+
+# ----------------- Market Scan (for /market-scan) -----------------
+
+def scan_market(
+    tickers=None,
+    bullish_threshold: float = 0.70,
+    bearish_threshold: float = 0.30,
+):
+    """
+    Run ML analysis across a basket of tickers.
+    Returns dict with two lists: 'bullish' and 'bearish'.
+
+    Each item:
+    {
+        'symbol': 'RELIANCE',        # no .NS
+        'probability': 78.4,         # in %
+        'explanation': '...'
+    }
+    """
+    if tickers is None:
+        tickers = ALL_TICKERS
+
+    bullish = []
+    bearish = []
+
+    for ticker in tickers:
         try:
-            _, summary, _ = run_analysis(ticker)
-            prob_up = summary.get("ml_prob_up")
-
-            # Skip if we don't have a valid probability
-            if prob_up is None:
-                continue
-
-            base_name = ticker.split(".")[0].upper()
-
-            raw_rows.append({
-                "name": base_name,   # e.g. RELIANCE
-                "ticker": ticker,    # e.g. RELIANCE.NS
-                "prob": float(prob_up)
-            })
-
+            _, summary, _ = run_analysis(ticker, show_plot=False)
         except Exception as e:
-            # Avoid crashing scan for one bad ticker
-            print(f"[SCAN] Error for {ticker}: {e}")
+            print(f"[scan_market] Skipping {ticker}: {e}")
             continue
 
-    # ---------------- Deduplicate by stock name (Method 1) ----------------
-    best_by_name = {}
-    for row in raw_rows:
-        name = row["name"]
-        if name not in best_by_name:
-            best_by_name[name] = row
-        else:
-            # Keep the row with the higher probability
-            if row["prob"] > best_by_name[name]["prob"]:
-                best_by_name[name] = row
+        prob_up = summary.get("ml_prob_up")
+        if prob_up is None:
+            # Skip if model had insufficient data
+            continue
 
-    unique_rows = list(best_by_name.values())
+        prob_pct = prob_up * 100.0
+        item = {
+            "symbol": ticker.split(".")[0],  # drop .NS for display
+            "probability": round(prob_pct, 1),
+            "explanation": _build_explanation(summary),
+        }
 
-    # ---------------- Split into Bullish / Bearish ----------------
-    bullish = [r for r in unique_rows if r["prob"] > 0.70]
-    bearish = [r for r in unique_rows if r["prob"] < 0.30]
+        if prob_up >= bullish_threshold:
+            bullish.append(item)
+        elif prob_up <= bearish_threshold:
+            bearish.append(item)
 
-    # Sort: bullish highest → lowest, bearish lowest → highest
-    bullish.sort(key=lambda r: r["prob"], reverse=True)
-    bearish.sort(key=lambda r: r["prob"])
+    # Sort for display
+    bullish.sort(key=lambda x: x["probability"], reverse=True)
+    bearish.sort(key=lambda x: x["probability"])   # lowest % first
 
-    # Add rank based on sorted order (1, 2, 3...)
-    for idx, row in enumerate(bullish, start=1):
-        row["rank"] = idx
-
-    for idx, row in enumerate(bearish, start=1):
-        row["rank"] = idx
-
-    return bullish, bearish
+    return {"bullish": bullish, "bearish": bearish}
 
 
 if __name__ == "__main__":
@@ -343,11 +362,7 @@ if __name__ == "__main__":
         print(f"{k}: {v}")
     print(f"\nCSV saved at: {path}")
 
-    # Optional: test market scan locally
-    # bullish, bearish = run_market_scan()
-    # print("\nBullish picks:")
-    # for r in bullish:
-    #     print(r)
-    # print("\nBearish picks:")
-    # for r in bearish:
-    #     print(r)
+    out = scan_market()
+    print("\nSample market scan (first 3 bullish/bearish):")
+    print("Bullish:", out["bullish"][:3])
+    print("Bearish:", out["bearish"][:3])
