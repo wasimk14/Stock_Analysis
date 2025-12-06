@@ -3,6 +3,6 @@ yfinance
 pandas
 numpy
 scikit-learn
-gunicorn
 matplotlib
 pytz
+gunicorn
