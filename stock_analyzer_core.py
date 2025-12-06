@@ -1,7 +1,7 @@
 """
 stock_analyzer_core.py
 Core engine for stock analysis (no email, no web).
-We will import run_analysis() from our Flask app.
+We will import run_analysis() and scan_market() from our Flask app.
 """
 
 import warnings, os, time
@@ -23,6 +23,39 @@ CACHE_TTL = 600  # 10 minutes
 warnings.filterwarnings("ignore", message="YF.download")
 
 TZ = "Asia/Kolkata"
+
+
+# --------- UNIVERSE: NIFTY50 + SENSEX (deduplicated) ---------
+ALL_TICKERS = [
+    # NIFTY 50 (approx list, can edit freely)
+    "ADANIENT.NS", "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS",
+    "AXISBANK.NS", "BAJAJ-AUTO.NS", "BAJFINANCE.NS", "BAJAJFINSV.NS",
+    "BPCL.NS", "BHARTIARTL.NS", "BRITANNIA.NS", "CIPLA.NS",
+    "COALINDIA.NS", "DIVISLAB.NS", "DRREDDY.NS", "EICHERMOT.NS",
+    "GRASIM.NS", "HCLTECH.NS", "HDFCBANK.NS", "HDFCLIFE.NS",
+    "HEROMOTOCO.NS", "HINDALCO.NS", "HINDUNILVR.NS", "ICICIBANK.NS",
+    "INDUSINDBK.NS", "INFY.NS", "IOC.NS", "ITC.NS",
+    "JSWSTEEL.NS", "KOTAKBANK.NS", "LT.NS", "M&M.NS",
+    "MARUTI.NS", "NESTLEIND.NS", "NTPC.NS", "ONGC.NS",
+    "POWERGRID.NS", "RELIANCE.NS", "SBILIFE.NS", "SBIN.NS",
+    "SHREECEM.NS", "SUNPHARMA.NS", "TATACONSUM.NS", "TATAMOTORS.NS",
+    "TATASTEEL.NS", "TCS.NS", "TECHM.NS", "TITAN.NS",
+    "UPL.NS", "ULTRACEMCO.NS", "WIPRO.NS",
+
+    # Sensex extras (some overlap with above; duplicates are harmless)
+    "ASIANPAINT.NS", "AXISBANK.NS", "BAJAJ-AUTO.NS", "BAJAJFINSV.NS",
+    "BAJFINANCE.NS", "BHARTIARTL.NS", "CIPLA.NS", "DRREDDY.NS",
+    "HCLTECH.NS", "HDFCBANK.NS", "HINDUNILVR.NS", "ICICIBANK.NS",
+    "INDUSINDBK.NS", "INFY.NS", "ITC.NS", "JSWSTEEL.NS",
+    "KOTAKBANK.NS", "LT.NS", "M&M.NS", "MARUTI.NS",
+    "NESTLEIND.NS", "NTPC.NS", "ONGC.NS", "POWERGRID.NS",
+    "RELIANCE.NS", "SBIN.NS", "SUNPHARMA.NS", "TATAMOTORS.NS",
+    "TCS.NS", "TECHM.NS", "TITAN.NS", "ULTRACEMCO.NS"
+]
+
+# Remove exact duplicates while preserving order
+_seen = set()
+ALL_TICKERS = [t for t in ALL_TICKERS if not (t in _seen or _seen.add(t))]
 
 
 def get_today_india():
@@ -58,7 +91,7 @@ def cleanup_old_files(folder, hours=6):
         if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
             try:
                 os.remove(path)
-            except:
+            except Exception:
                 pass
 
 
@@ -109,7 +142,7 @@ def run_analysis(ticker="SOLARINDS.NS", show_plot=False):
     df["VWAP"] = (df["Close"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
     df["VWAP_Diff_%"] = (df["Close"] - df["VWAP"]) / df["VWAP"] * 100
 
-    # ------------- Spike detection (kept for completeness) -------------
+    # ------------- Spike detection -------------
     df["Spike_ruleA"] = df["Volume"] > 1.5 * df["VMA_20"]
     roll_mean = df["Volume"].rolling(window=60, min_periods=10).mean()
     roll_std = df["Volume"].rolling(window=60, min_periods=10).std()
@@ -232,6 +265,95 @@ def run_analysis(ticker="SOLARINDS.NS", show_plot=False):
     return df, summary, report_path
 
 
+# ----------------- Explainability helpers -----------------
+
+def _build_explanation(summary: dict) -> str:
+    """
+    Turn summary metrics into a short human-readable sentence.
+    This is what appears under each stock in the Market Scan.
+    """
+    parts = []
+
+    ss = summary.get("strength_score")
+    direction = summary.get("strength_direction")
+    if ss is not None:
+        parts.append(f"Strength score {ss:.2f} ({direction}).")
+
+    vwap = summary.get("vwap_deviation_pct")
+    if vwap is not None:
+        if vwap > 0:
+            parts.append(f"Price ~{abs(vwap):.1f}% above VWAP.")
+        elif vwap < 0:
+            parts.append(f"Price ~{abs(vwap):.1f}% below VWAP.")
+
+    rv = summary.get("relative_volume")
+    if rv is not None:
+        parts.append(f"Relative volume ~{rv:.2f}× vs 20-day average.")
+
+    prob = summary.get("ml_prob_up")
+    if prob is not None:
+        parts.append(f"Model sees {prob * 100:.1f}% chance of next-day rise.")
+
+    if not parts:
+        return "No clear signal — insufficient recent data."
+    return " ".join(parts)
+
+
+# ----------------- Market Scan (for /market-scan) -----------------
+
+def scan_market(
+    tickers=None,
+    bullish_threshold: float = 0.70,
+    bearish_threshold: float = 0.30,
+):
+    """
+    Run ML analysis across a basket of tickers.
+    Returns dict with two lists: 'bullish' and 'bearish'.
+
+    Each item:
+    {
+        'symbol': 'RELIANCE',        # no .NS
+        'probability': 78.4,         # in %
+        'explanation': '...'
+    }
+    """
+    if tickers is None:
+        tickers = ALL_TICKERS
+
+    bullish = []
+    bearish = []
+
+    for ticker in tickers:
+        try:
+            _, summary, _ = run_analysis(ticker, show_plot=False)
+        except Exception as e:
+            print(f"[scan_market] Skipping {ticker}: {e}")
+            continue
+
+        prob_up = summary.get("ml_prob_up")
+        if prob_up is None:
+            # Skip if model had insufficient data
+            continue
+
+        prob_pct = prob_up * 100.0
+        item = {
+            "symbol": ticker.split(".")[0],  # drop .NS for display
+            "probability": round(prob_pct, 1),
+            "explanation": _build_explanation(summary),
+        }
+
+        if prob_up >= bullish_threshold:
+            bullish.append(item)
+        elif prob_up <= bearish_threshold:
+            bearish.append(item)
+
+    # Sort for display
+    bullish.sort(key=lambda x: x["probability"], reverse=True)
+    bearish.sort(key=lambda x: x["probability"])   # lowest % first
+
+    return {"bullish": bullish, "bearish": bearish}
+
+
 if __name__ == "__main__":
     # Quick manual test (no GUI windows because Agg backend)
     df, summary, path = run_analysis("SOLARINDS.NS", show_plot=False)
@@ -239,3 +361,8 @@ if __name__ == "__main__":
     for k, v in summary.items():
         print(f"{k}: {v}")
     print(f"\nCSV saved at: {path}")
+
+    out = scan_market()
+    print("\nSample market scan (first 3 bullish/bearish):")
+    print("Bullish:", out["bullish"][:3])
+    print("Bearish:", out["bearish"][:3])
