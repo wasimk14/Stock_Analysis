@@ -1,7 +1,7 @@
 from flask import Flask, render_template, request, send_from_directory, Response, redirect
 import os
 
-from stock_analyzer_core import run_analysis, scan_market
+from stock_analyzer_core import run_analysis, run_market_scan
 
 app = Flask(__name__)
 
@@ -49,40 +49,44 @@ def analyze():
         return render_template("index.html", error=str(e))
 
 
-@app.route("/download/<filename>")
-def download_report(filename):
-    return send_from_directory(REPORT_FOLDER, filename, as_attachment=True)
-
-
-# ---------------- Market Scan Route ----------------
+# ======================================================================
+# New route: On-demand Market Scan
+# ======================================================================
 
 @app.route("/market-scan", methods=["GET"])
 def market_scan():
     """
-    On-demand scan across NIFTY 50 + Sensex.
-    Shows only tickers with:
-      - Bullish: prob_up > 70%
-      - Bearish: prob_up < 30%
+    Runs the NIFTY50 + Sensex30 scan on-demand.
+    Uses Method 1: dedupe by stock name only and keep highest probability.
     """
     try:
-        result = scan_market()  # uses default ALL_TICKERS
+        bullish, bearish = run_market_scan()
+
         return render_template(
             "market_scan.html",
-            bullish=result["bullish"],
-            bearish=result["bearish"],
+            bullish=bullish,
+            bearish=bearish
         )
+
     except Exception as e:
-        return render_template("index.html", error=f"Market scan failed: {e}")
+        # If something goes wrong, show a friendly message on home page
+        return render_template(
+            "index.html",
+            error=f"Market scan failed: {e}"
+        )
 
 
-# --------------- SEO helpers -----------------
+@app.route("/download/<filename>")
+def download_report(filename):
+    return send_from_directory(REPORT_FOLDER, filename, as_attachment=True)
+
 
 @app.route("/robots.txt")
 def robots_txt():
     content = (
         "User-agent: *\n"
         "Allow: /\n"
-        "Sitemap: https://stock-analysis-tfm3.onrender.com/sitemap.xml"
+        "Sitemap: https://stock-oracle-468628049094.asia-south1.run.app/sitemap.xml"
     )
     return Response(content, mimetype="text/plain")
 
@@ -93,9 +97,15 @@ def sitemap_xml():
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 
     <url>
-        <loc>https://stock-analysis-tfm3.onrender.com/</loc>
+        <loc>https://stock-oracle-468628049094.asia-south1.run.app/</loc>
         <changefreq>weekly</changefreq>
         <priority>1.0</priority>
+    </url>
+
+    <url>
+        <loc>https://stock-oracle-468628049094.asia-south1.run.app/market-scan</loc>
+        <changefreq>daily</changefreq>
+        <priority>0.8</priority>
     </url>
 
 </urlset>
