@@ -1,8 +1,8 @@
 Flask
-gunicorn
+yfinance
 pandas
 numpy
-yfinance
-pytz
-matplotlib
 scikit-learn
+gunicorn
+matplotlib
+pytz
