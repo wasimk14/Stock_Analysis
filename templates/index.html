@@ -50,6 +50,12 @@
         </button>
     </form>
 
+    <div class="text-center mt-4">
+        <a href="/market-scan" class="btn btn-success px-4 py-2 rounded-4 fw-semibold">
+            📊 Run Market Scan (NIFTY50 + Sensex)
+        </a>
+    </div>
+
     <!-- Loading Spinner -->
     <div id="loadingSpinner" class="text-center mt-4" style="display: none;">
         <div class="spinner-border text-primary" role="status" style="width: 3rem; height: 3rem;"></div>
@@ -69,9 +75,7 @@
             document.getElementById("loadingSpinner").style.display = "block";
         });
     });
-</script>
 
-<script>
     const input = document.querySelector("input[name='ticker']");
     input.addEventListener("input", function () {
         this.value = this.value.toUpperCase();
